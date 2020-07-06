@@ -1,0 +1,1557 @@
+---
+title: "Project-IE360"
+author: "Group_18"
+date: "6/13/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, include=FALSE}
+require(jsonlite)
+require(httr)
+require(data.table)
+library(stats)
+library(forecast)
+library(ggplot2)
+library("MASS")
+library("faraway")
+library("caret")
+library("car")
+library("nlme")
+library("nloptr")
+
+library("NlcOptim")
+
+
+
+
+get_token <- function(username, password, url_site){
+    
+    post_body = list(username=username,password=password)
+    post_url_string = paste0(url_site,'/token/')
+    result = POST(post_url_string, body = post_body)
+
+    # error handling (wrong credentials)
+    if(result$status_code==400){
+        print('Check your credentials')
+        return(0)
+    }
+    else if (result$status_code==201){
+        output = content(result)
+        token = output$key
+    }
+
+    return(token)
+}
+
+get_data <- function(start_date='2020-03-20', token, url_site){
+    
+    post_body = list(start_date=start_date,username=username,password=password)
+    post_url_string = paste0(url_site,'/dataset/')
+    
+    header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+    result = GET(post_url_string, header, body = post_body)
+    output = content(result)
+    data = data.table::rbindlist(output)
+    data[,event_date:=as.Date(event_date)]
+    data = data[order(product_content_id,event_date)]
+    return(data)
+}
+
+
+send_submission <- function(predictions, token, url_site, submit_now=F){
+    
+    format_check=check_format(predictions)
+    if(!format_check){
+        return(FALSE)
+    }
+    
+    post_string="list("
+    for(i in 1:nrow(predictions)){
+        post_string=sprintf("%s'%s'=%s",post_string,predictions$product_content_id[i],predictions$forecast[i])
+        if(i<nrow(predictions)){
+            post_string=sprintf("%s,",post_string)
+        } else {
+            post_string=sprintf("%s)",post_string)
+        }
+    }
+    
+    submission = eval(parse(text=post_string))
+    json_body = jsonlite::toJSON(submission, auto_unbox = TRUE)
+    submission=list(submission=json_body)
+    
+    print(submission)
+    # {"31515569":2.4,"32939029":2.4,"4066298":2.4,"6676673":2.4,"7061886":2.4,"85004":2.4} 
+
+    if(!submit_now){
+        print("You did not submit.")
+        return(FALSE)      
+    }
+    
+
+    header = add_headers(c(Authorization=paste('Token',token,sep=' ')))
+    post_url_string = paste0(url_site,'/submission/')
+    result = POST(post_url_string, header, body=submission)
+    
+    if (result$status_code==201){
+        print("Successfully submitted. Below you can see the details of your submission")
+    } else {
+        print("Could not submit. Please check the error message below, contact the assistant if needed.")
+    }
+    
+    print(content(result))
+    
+}
+
+check_format <- function(predictions){
+    
+    if(is.data.frame(predictions) | is.data.frame(predictions)){
+        if(all(c('product_content_id','forecast') %in% names(predictions))){
+            if(is.numeric(predictions$forecast)){
+                print("Format OK")
+                return(TRUE)
+            } else {
+                print("forecast information is not numeric")
+                return(FALSE)                
+            }
+        } else {
+            print("Wrong column names. Please provide 'product_content_id' and 'forecast' columns")
+            return(FALSE)
+        }
+        
+    } else {
+        print("Wrong format. Please provide data.frame or data.table object")
+        return(FALSE)
+    }
+    
+}
+
+# this part is main code
+subm_url = 'http://167.172.183.67'
+
+u_name = "Group18"
+p_word = "ZbaJBxomdx2OKmj9"
+submit_now = FALSE
+
+username = u_name
+password = p_word
+
+token = get_token(username=u_name, password=p_word, url=subm_url)
+data = get_data(token=token,url=subm_url)
+
+```
+
+# Introduction
+
+Trendyol is a leading online retailer where you can purchase products in numerous categories. 
+
+In the project we have 8 products in different categories. We have the information of price, number of sales, number of page visits, number of people who favored , number of people have it in basket, total number of sales in the category and the total number of sales of the brand in the same category data for all 8 products. 
+
+
+# Solution Steps
+
+### Data 
+
+For every product, we seperate the dataset. Afterwards we check the dataset to eliminate the dates when the product is not on sale. After cleaning the data, we plot the sales number of the product and its Auto - Correlation graph to see its behaviour. 
+
+Trendyol does some special sale days such as black friday. In these sale days, the number of sales become outliers. Also before and after these days mostly their number of sales decrease. To have a smoothened data we used averaging for those days. The number of sales in outlier days are transformed into the mean of their neighbors. 
+
+### Building Forecasting Models
+
+Our models are based on linear regression and arima. We have 8 different products from 8 different categories. For linear regression models, we consider the possible effects by products and try to include these effects. For Arima Models, we check its Auto Correlation function to guess the Arima parameters. We also consider the auto arima model found by R.
+
+### Validation of The Models
+
+For every data we have, we chose our model by confirming its validity. For that we used time series cross validation from 1 to 50 days.  And we used the model which shows smallest Mean Absolute Error (MAE).
+
+# Forecasting Models for Products
+
+## Product 1
+#### Leggings
+
+This product is used by high number of women every day. Its sales is not expected to be affected by seasons. So now we check its plot.
+
+
+```{r,echo=F}
+data1 <- data[product_content_id == "31515569"]
+data1 <- data1[146:length(data1$price)]
+
+ggplot(data1,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data1$sold_count)),color = "blue")
+
+```
+*Graph 1: Number of Sales over Time of Product 1*
+
+There seems a peak at around November. This is when the black friday discount happens. The Blue Line is the Mean of the sales. It is visible that after and before the discount, the sales seems to go lower than average.
+
+Now we check the Auto-Correlation Graph of the data.
+
+```{r,echo=F}
+
+acf(data1$sold_count,100)
+```
+*Graph 2: Auto-Correlation Graph of the Number of Sales over Time of Product 1*
+
+The neighbouring days have a high correlation over time. This is a sign of trend. There seems no seasonality.
+
+
+Now we will create an alternative dataset where the outlier days is smoothened. We will use both the original and the alternative datasets while building our models. 
+
+
+```{r}
+data1_alt <- data1
+data1_alt$sold_count[40:80] <- mean(data1$sold_count[30:90])
+
+```
+
+
+#### Linear Regression Model
+
+We start with using every possible parameter in the model. 
+```{r,echo=F}
+model1.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,data1)
+summary(model1.1)
+```
+There seems to exist insignificant attributes. 
+
+Now we calculate the Akaike Information Criteria.
+```{r,echo=FALSE}
+AIC(model1.1)
+
+```
+
+After several steps to eliminate the insignificant attributes, our final linear regression model is:
+
+```{r,echo =F}
+model1.4 <- lm(sold_count~visit_count+favored_count+basket_count+category_visits,data1)
+summary(model1.4)
+```
+It has a relatively hig R^2 with 0.78. 
+
+Now we check its Akaike Information Criteria value.
+```{r,echo=F}
+AIC(model1.4)
+```
+
+We implied similiar steps to the alternative data. Our best model with the alternative data is:
+
+```{r,echo=F}
+model_alt1.2 <-  lm(sold_count~visit_count+favored_count+category_sold+basket_count+category_brand_sold+category_visits,data1_alt)
+summary(model_alt1.2)
+```
+It has a higher R^2 value than the original dataset. But now more attributes seems significant.
+
+Now we check its Akaike Information Criteria value.
+```{r,echo=FALSE}
+AIC(model_alt1.2)
+```
+
+#### ARIMA model
+
+We used 2 arima models, one by automated function auto.arima and one by trial.
+
+```{r,echo=F}
+model_arima1.1 <- auto.arima(data1$sold_count)
+model_arima1.2 <- arima(data1$sold_count, c(3,1,2))
+
+```
+
+The ARIMA model generated by auto.arima function:
+```{r,echo=FALSE}
+summary(model_arima1.1)
+```
+
+The ARIMA model built by us:
+```{r,echo=FALSE}
+summary(model_arima1.2)
+```
+
+
+For the alternative dataset we used same method and come up with 2 arima candidates:
+
+```{r,echo=F}
+model_arima_alt1.1 <- auto.arima(data1_alt$sold_count)
+model_arima_alt1.2 <- arima(data1_alt$sold_count, c(3,1,2))
+
+```
+
+#### Time Series Cross Validation
+Now we have 6 different models. We will run a time series cross-validation with these models. The cross validation is going to be from 1 day to 50.
+
+```{r}
+MAE_lm1 <- c()
+MAE_lm2 <- c()
+MAE_arima1 <- c()
+MAE_arima2 <- c()
+MAE_arima3 <- c()
+MAE_arima4 <- c()
+
+
+for(i in 1:50){
+data1_train <- data1[1:(.N-i)]
+data1_test <-  data1[(.N-i+1):.N]
+
+data1_alt_train <-  data1_alt[1:(.N-i)]
+data1_alt_test <- data1_alt[(.N-i+1):.N]
+
+model_lm1 <- lm(sold_count~visit_count+favored_count+basket_count+category_visits,data1_train)
+model_lm2 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+category_brand_sold+category_visits,data1_alt_train)
+
+model_arima1 <-  auto.arima(data1_train$sold_count)
+model_arima2 <- arima(data1_train$sold_count, c(3,1,2))
+
+model_arima3 <- auto.arima(data1_alt_train$sold_count)
+model_arima4 <- arima(data1_alt_train$sold_count, c(3,1,2))
+
+
+pred_lm1 <- predict(model_lm1,newdata=data1_test)
+pred_lm2 <- predict(model_lm2,newdata=data1_alt_test)
+
+for_arima1 <- forecast(model_arima1,i)
+for_arima2 <- forecast(model_arima2,i)
+for_arima3 <- forecast(model_arima3,i)
+for_arima4 <- forecast(model_arima4,i)
+
+
+
+MAE_lm1 <- c(MAE_lm1,mean(abs(pred_lm1 - data1_test$sold_count)))
+MAE_lm2 <- c(MAE_lm2,mean(abs(pred_lm2 - data1_alt_test$sold_count)))
+MAE_arima1 <- c(MAE_arima1,mean(abs(for_arima1$mean - data1_test$sold_count)))
+MAE_arima2 <- c(MAE_arima2,mean(abs(for_arima2$mean - data1_test$sold_count)))
+MAE_arima3 <- c(MAE_arima3,mean(abs(for_arima3$mean - data1_alt_test$sold_count)))
+MAE_arima4 <- c(MAE_arima4,mean(abs(for_arima4$mean - data1_alt_test$sold_count)))
+
+}
+
+
+
+```
+Mean Absolute Error of Linear Model 1:
+```{r,echo=F}
+mean(MAE_lm1)
+```
+Mean Absolute Error of Linear Model 2:
+```{r,echo=F}
+mean(MAE_lm2)
+```
+Mean Absolute Error of ARIMA Model 1:
+```{r,echo=F}
+mean(MAE_arima1)
+```
+Mean Absolute Error of ARIMA Model 2:
+```{r,echo=F}
+mean(MAE_arima2)
+```
+Mean Absolute Error of ARIMA Model 3:
+```{r,echo=F}
+mean(MAE_arima3)
+```
+Mean Absolute Error of ARIMA Model 4:
+```{r,echo=F}
+mean(MAE_arima4)
+```
+
+It is clear that the model with lowest mean absolute error is our linear regression model with the alternative data.
+
+
+## Product 2
+#### Rechargeable Electric Toothbrush
+
+The product-2 (oral-b  Electric Toothbrush) has become widespread in recent years and the user portfolio has a large consumer base. Based on the number of sales, we assume that there is no seasonality.
+
+
+```{r,echo=F}
+data2 <- data[product_content_id == "32939029"]
+data2 <- data2[206:length(data2$price)]
+for(i in 1:length(data2$price)){
+  if(data2$price[i]==-1){
+    data2$price[i]=mean(data2$price[1:length(data2$price)])
+     }
+}
+
+ggplot(data2,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,data2$price),color = "blue") + geom_line(aes(event_date,data2$visit_count/100),color = "red")
+
+```
+*Graph 3: Number of Sales over Time of Product 2 * 
+Auto-Correlation plot of the sales:
+```{r,echo=F}
+acf(data2$sold_count,lag.max = 100)
+```
+*Graph 4: Auto-Correlation Graph of the Number of Sales over Time of Product 1*
+
+
+#### ARIMA Model
+in the first step, we will found arima model as alternative model
+auto.arima and arima is used
+
+Our first Arima model generated by auto.arima:
+```{r,echo=F}
+ar.model2.1 <- auto.arima(data2$sold_count)
+summary(ar.model2.1) 
+
+```
+
+Our second Arima model:
+```{r,echo=F}
+ar.model2.2 <- arima(data2$sold_count, c(3,1,2))
+summary(ar.model2.2)
+```
+
+#### Linear Regression Model
+
+We started with using every possible parameter in the linear model.
+```{r,echo=F}
+model2.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,data2)
+summary(model2.1)
+```
+Akaike Information Criteria of the model:
+```{r,echo=F}
+AIC(model2.1)
+
+```
+
+After the first model, insignificant parameters will be eliminated one by one. And we add square values of the most significant attributes.
+
+And our final linear model becomes:
+
+```{r,echo=F}
+model2.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+I(price^2)+category_visits,data2)
+summary(model2.5)
+      
+```
+Akaike Information Criteria of the model:
+```{r,echo=F}
+AIC(model2.5)
+```
+ We have an R^2 value of 0.77 and our AIC value is decreased. We will move on with this model.
+ 
+ 
+#### Time Series Cross Validation:
+
+We have 3 models and now we will run time series 50 days cross validation on our models.
+
+```{r,echo=F}
+
+      MAE_model2.5 <- c()
+      MAE_ar.model1 <- c()
+      MAE_ar.model2 <- c()
+      
+      for(i in 1:50){
+        data2_train <- data2[2:(.N-i)]
+        data2_test <-  data2[(.N-i+1):.N]
+        
+       
+        model2.5 <- lm(sold_count~visit_count+I(visit_count^2)+favored_count+category_sold+basket_count+price+I(price^2)+category_visits,data2)
+        
+        ar.model2.1 <- auto.arima(data2$sold_count)
+        ar.model2.2 <- arima(data2$sold_count, c(3,1,2))
+        
+        prediction_model2.5 <- predict(model2.5,newdata=data2_test)
+        
+        for_arima1 <- forecast(ar.model2.1,i)
+        for_arima2 <- forecast(ar.model2.2,i)
+        
+        MAE_model2.5 <- c(MAE_model2.5,mean(abs(prediction_model2.5 - data2_test$sold_count)))
+        
+        MAE_ar.model1 <- c(MAE_ar.model1,mean(abs(for_arima1$mean - data2_test$sold_count)))
+        MAE_ar.model2 <- c(MAE_ar.model2,mean(abs(for_arima2$mean - data2_test$sold_count)))
+      }
+
+                   
+          
+```
+
+Mean Absolute Error of our linear model:
+```{r,echo=F}
+mean(MAE_model2.5)     
+```
+
+Mean Absolute Error of our first ARIMA model:
+```{r,echo=F}
+          mean(MAE_ar.model1)
+```
+Mean Absolute Error of our second ARIMA model:
+```{r,echo=F}
+          mean(MAE_ar.model2)
+```
+The lowest mean came from our first ARIMA model with parameters (1,1,1).
+
+
+
+
+## Product 3
+#### Coat
+
+This product is a coat and we expect it to have higher sale numbers in winter and autumn.
+
+```{r,echo = F}
+data3 <- data[product_content_id == "3904356"]
+
+ggplot(data3,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data3$sold_count)),color = "blue")
+
+```
+*Graph 6: Number of Sales over Time of Product 3*
+
+The graph shows as we expected. Most of the sales are mainly between September and January. After February there is too few sales happened. 
+
+```{r,echo=F}
+acf(data3$sold_count,lag.max = 80)
+```
+*Graph 7: Auto-Correlation Graph of the Number of Sales over Time of Product 3*
+
+There seems no clear seasonality. The day before has a correlation.
+
+So we add new columns which may be effective on building our model. These columns are:
+-1 and 2 day shifted numbers of sales
+-A binomial column specifing winter months
+-A binomial column specifing summer months
+
+```{r,echo=F}
+data3.2 <- data3
+data3.2[,lag1:=shift(sold_count,1)]
+data3.2[,lag2:=shift(sold_count,2)]
+data3.2[,'is_winter':= { 
+  if (month(as.Date(event_date)) == 11) 1
+  else if (month(as.Date(event_date)) == 12 ) 1
+  else if ( month(as.Date(event_date)) == 1 ) 1
+  else if ( month(as.Date(event_date)) == 2 ) 1
+  else    0                  }
+  ,by = event_date]
+
+data3.2[,'is_summer':= { 
+  if (month(as.Date(event_date)) == 5) 1
+  else if (month(as.Date(event_date)) == 6 ) 1
+  else if ( month(as.Date(event_date)) == 7 ) 1
+  else if ( month(as.Date(event_date)) == 8 ) 1
+  else    0                  }
+  ,by = event_date]
+
+```
+
+#### Linear Regression Model
+
+We start with using every possible parameter in the model. 
+```{r,echo=F}
+model_lm3.1 <- lm(sold_count~price+visit_count+favored_count+basket_count+category_sold+category_brand_sold+category_visits+ty_visits+lag2+lag1+is_winter+is_summer ,data3.2)
+summary(model_lm3.1)
+
+```
+There seems to exist insignificant attributes. 
+
+Now we calculate the Akaike Information Criteria.
+```{r,echo=FALSE}
+AIC(model_lm3.1)
+
+```
+
+After several steps to eliminate the insignificant attributes, our final linear regression model is:
+
+```{r,echo=FALSE}
+model_lm3.4 <- lm(sold_count~price+visit_count+favored_count+category_brand_sold+category_visits+lag1+lag2+is_winter+is_summer ,data3.2)
+summary(model_lm3.4)
+```
+We noticed that visit count has a high significance. So we add the square value of the visit count to the model and our final linear regression model is:
+
+```{r,echo=FALSE}
+data3.2[,visit_sq :=visit_count^2]
+model_lm3.5 <- lm(sold_count~price+visit_count+favored_count+category_brand_sold+visit_sq+category_visits+lag2+lag1+is_winter+is_summer ,data3.2)
+summary(model_lm3.5)
+```
+Now we calculate the Akaike Information Criteria.
+
+```{r,echo=F}
+AIC(model_lm3.5)
+
+```
+ 
+ It has a relatively high R^2 value of 0.88. AIC value is better than the initial model, we will move on with this model.
+ 
+#### ARIMA model
+
+We used 2 arima models, one by automated function auto.arima and one by trial.
+
+```{r,echo=F}
+model_arima3.1 <- auto.arima((data3.2$sold_count))
+model_arima3.2 <- arima(data3.2$sold_count,c(0,1,1))
+```
+
+The ARIMA model generated by auto.arima function:
+```{r,echo=FALSE}
+summary(model_arima3.1)
+```
+
+The ARIMA model built by us:
+```{r,echo=FALSE}
+summary(model_arima3.2)
+```
+
+Now we have 3 different models. We will run a time series cross-validation with these models. The cross validation is going to be from 1 day to 50.
+
+```{r}
+MAE_vec3.1 <- c()
+MAE_vec3.2 <- c()
+MAE_vec3.3 <- c()
+
+for(i in 1:50){
+  data3_train <- data3.2[1:(.N-i)] 
+  data3_test <-  data3.2[(.N-i+1):.N]
+  
+  model3.1 <- auto.arima((data3_train$sold_count))
+  model3.2 <- arima(data3_train$sold_count,c(0,1,1))
+  model3.3 <- lm(sold_count~price+visit_count+favored_count+category_brand_sold+visit_sq+category_visits+lag2+lag1+is_winter+is_summer ,data3_train)
+  
+  forecast1 <- forecast(model3.1,i)
+  forecast2 <- forecast(model3.2,i)
+  forecast3 <- predict(model3.3,data3_test)
+  
+  MAE3.1 <- mean(abs(forecast1$mean-data3_test$sold_count))
+  MAE3.2 <- mean(abs(forecast2$mean-data3_test$sold_count))
+  MAE3.3 <- mean(abs(forecast3-data3_test$sold_count))
+  
+  MAE_vec3.1 <- c(MAE_vec3.1,MAE3.1)
+  MAE_vec3.2 <- c(MAE_vec3.2,MAE3.2)
+  MAE_vec3.3 <- c(MAE_vec3.3,MAE3.3)
+}
+
+
+
+
+```
+
+
+Mean Absolute Error of ARIMA Model 1:
+```{r,echo=F}
+mean(MAE_vec3.1)
+```
+Mean Absolute Error of ARIMA Model 2:
+```{r,echo=F}
+mean(MAE_vec3.2)
+```
+Mean Absolute Error of Linear Model 1:
+```{r,echo=F}
+mean(MAE_vec3.3)
+
+```
+
+It is clear that the model with lowest mean absolute error is our ARIMA (0,1,1) model found by our trials.
+
+
+
+ 
+
+
+
+## Product 4
+#### Step 1
+
+
+This product is baby wet wipes.Before any analysis, we don't expect a significant seasonality because it can be used eveyrday.There is no specific time periods that people used more wet wipes.First of all the dates of the data ordered  from past to present.Then, the rows which product has started to selling selected.. Product has been selling since the date 2019-09-09.Afterall acf is checked as seen in **figure 1**. There is not any repeating pattern in acf lags. Despite the lag 16 and lag 18 are high the rest of the lags are insignificant.For visualization I plot sold count of product 4 as seen in **figure 2**.On some days, the sales amount was extremely high.These days can be interpreted as outliers.Also, by a visual observation there might be an increasing trend in the sold count. 
+
+#### Step 2 
+Discount between the dates 2019-11-08-2019-11-13,iblack friday week and the first two days of corona are selected as outliers. Therefore,for the sales count of these days average of overall sales count is used. Also 'is_Covid'is created in order the explain the sales count after Corona.After taking mean for these outlier days the new Acf can seen in **figure 3**.The new plot can seen in **figure 4**. 
+
+#### Step 3 
+Trend is modelled by using linear regression approach.Visualization of trend can seen in **figure 5**. After removing trend from sold count acf is again calculated as seen in **figure 6** and there is still no repeating pattern in lags.So, seasonality becames not that much significant for this data.Therefore, modelling the sold count for this product linear approach will be used.
+
+#### Step 4
+4 linear model is used for this product.Square of visit count and square of favored count also included to model 3 and model 4  beacuse their effect on sold count are important. In addition to the other variables  in data is_Covid included to model 4, trend also included all these for models. Cross validation is applied.Forecasts are  made for test data. Visualization of these forecasts can seen in **figure 7**.Mse,mad and mape values are calculated as seen in **figure 8**.According to mape values model 4 has the lowest value so it is better to use model 4 for this product. 
+ 
+
+#### Figures 
+
+
+
+![Graph 8: Acf of sold count ](1.png)
+
+<center>
+
+![Graph 9:Plot of sold count  ](2.png)
+
+<center>
+
+![Graph 10: Acf of sold count after outliers removed ](as3.png)
+
+<center>
+
+![Graph 11: Plot of sold count after outliers removed ](as4.png)
+
+<center>
+
+![Graph 12: Visualization of trend](3.png)
+
+<center>
+
+![Graph 13: Acf after removing trend  ](6.png)
+
+<center>
+
+![Graph 14: Visualizations of forecasts ](7.png)
+
+<center>
+![Graph 15: Error calculations of forecasts  ](profson.JPG)
+
+<center>
+
+#### codes for figures 
+
+##### Code for Figure 1
+  
+```{r, eval = FALSE}
+acf(ps4$sold_count,lag.max=100)
+```
+
+##### Code for Figure 2
+ 
+```{r, eval = FALSE}
+plot(ps4$sold_count,type="l")
+```
+ 
+##### Code for Figure 3
+```{r, eval = FALSE}
+acf(ps4$sold_count,lag.max=150) 
+```
+
+
+##### Code for Figure 4
+```{r, eval = FALSE}
+plot(ps4$sold_count,type="l")
+```
+
+
+##### Code for Figure 5
+```{r, eval = FALSE}
+matplot(trend4[,list(sold_count,lr_trend4)],type="l") 
+```
+
+##### Code for Figure 6
+```{r, eval = FALSE}
+acf(trend4$detrend,lag.max=150) 
+```
+
+
+##### Code for Figure 7
+```{r, eval = FALSE}
+ts.plot(test4$sold_count) #visualization of predictions and real values
+lines(test4$pred1,col="blue")
+lines(test4$pred2,col="brown")
+lines(test4$pred3,col="orange")
+lines(test4$pred4,col="green")
+
+```
+
+
+##### Code for Figure 8
+```{r, eval = FALSE}
+res=res[,list(mse=mean(se,na.rm=TRUE),mad=mean(ad,na.rm=TRUE),mape=mean(ape,na.rm=TRUE)),by=list(variable)]
+
+```
+
+
+
+
+
+#### Code for product 4 
+```{r, eval = FALSE}
+
+library(data.table)
+library(forecast)
+install.packages("data.table") #install the required packages
+install.packages("forecast")
+
+data=fread("C:/Users/LENOVO/Desktop/challenge.csv",header=TRUE) #read the data 
+str(data)
+
+
+
+4066298
+content.id=	4066298 #id for the product 
+
+
+data4 <- data[product_content_id == "4066298"]
+data4<-as.data.table(data4)
+# converting order of the date from past to future
+p4<-data4[rev(order(as.Date(data4$event_date, format="%d/%m/%Y"))),]
+# the product has been selling since 2019-09-09 
+ps4<-p4[133:373,] 
+acf(ps4$sold_count,lag.max=100) #?t is a daily data and there is only significant increade in lag 16 and 18 the rest looks unsignificant  on 
+plot(ps4$sold_count,type="l")
+
+
+
+#black friday unordinary sold count  
+ps4$sold_count[77:84] <-  mean(ps4$sold_count,na.rm = T)
+acf(ps4$sold_count,lag.max=150) 
+plot(ps4$sold_count,type="l")
+
+#discount unordinary sales  
+ps4$sold_count[61:66] <-  mean(ps4$sold_count,na.rm = T)
+acf(ps4$sold_count,lag.max=150) 
+plot(ps4$sold_count,type="l")
+
+#first two days of corona because it increase almost 4 times compare two one day before 
+ps4$sold_count[184:185] <-  mean(ps4$sold_count,na.rm = T)
+acf(ps4$sold_count,lag.max=150) 
+plot(ps4$sold_count,type="l")
+
+#effects of covid 
+ps4[,'is_Covid':= { 
+  if (as.Date(event_date)>as.Date("2020-03-10") ) 1
+  else    0                  }
+  ,by = event_date]
+
+
+#Due to the fact that there was no repeating pattern in acf lags seasonal effects seem insignificant 
+#there might be trend so I modelled trend 
+
+trend4=ps4[,list(event_date,sold_count)]
+trend4[,index:=1:.N]
+ltrend4<-lm(sold_count~index,trend4) #good r squared 
+summary(ltrend4)
+ltrend4<-ltrend4$fitted
+trend4[,lr_trend4:=ltrend4]
+matplot(trend4[,list(sold_count,lr_trend4)],type="l") #good visualization of linear trend 
+ps4[,trend:=trend4$lr_trend4]
+
+
+trend4[,detrend:=sold_count-lr_trend4]
+plot(trend4$detrend,type='l')
+acf(trend4$detrend,lag.max=150) #after removing trend  still no repeating pattern in lags  
+
+
+fit=lm(sold_count~price + visit_count + favored_count 
+        + basket_count + category_sold + category_brand_sold+trend ,
+        data=ps4)
+summary(fit)
+checkresiduals(fit)
+AIC(fit)
+#r squared g?zel ??kt?
+fit2=lm(sold_count~price + visit_count + favored_count 
+       + basket_count+trend ,
+       data=ps4)
+summary(fit2)
+checkresiduals(fit2)
+AIC(fit2)
+
+vsq<-ps4[,"visitsq" := visit_count^2]
+fsq<-ps4[,"favoredsq" := favored_count^2]
+
+fit3=lm(sold_count~ visit_count+ visitsq + favored_count+favoredsq+basket_count+category_sold+category_brand_sold +price+trend ,data=ps4)
+summary(fit3)
+checkresiduals(fit3)
+AIC(fit3)
+
+fit4=lm(sold_count~ visit_count+ visitsq  + favored_count+favoredsq+basket_count+category_sold+category_brand_sold +price+trend+is_Covid ,data=ps4)
+summary(fit4)
+checkresiduals(fit4)
+AIC(fit4)
+
+for(i in 1:90){
+  
+  train4 <- ps4[1:(.N-i)] 
+  test4 <-  ps4[(.N-i+1):.N]
+  
+  
+  model1 <- lm(sold_count~price + visit_count + favored_count 
+               + basket_count+trend ,
+               data=train4)
+  model2<-lm(sold_count~price + visit_count + favored_count 
+             + basket_count+trend ,
+             data=train4)
+  model3<-lm(sold_count~ visit_count+ visitsq + favored_count+favoredsq+basket_count+category_sold+category_brand_sold +price+trend ,data=train4)
+  model4<-lm(sold_count~ visit_count+ visitsq  + favored_count+favoredsq+basket_count+category_sold+category_brand_sold +price+trend+is_Covid ,data=train4)
+  
+  forecast1<- predict(model1,test4)
+  forecast2<- predict(model2,test4)
+  forecast3<- predict(model3,test4)
+  forecast4<-predict(model4,test4)
+  
+  
+}
+
+
+
+test4[,pred1:=forecast1]
+test4[,pred2:=forecast2]
+test4[,pred3:=forecast3]
+test4[,pred4:=forecast4]
+ts.plot(test4$sold_count) #visualization of predictions and real values
+lines(test4$pred1,col="blue")
+lines(test4$pred2,col="brown")
+lines(test4$pred3,col="orange")
+lines(test4$pred4,col="green")
+predtable=test4[,.(event_date,sold_count,pred1,pred2,pred3,pred4)]
+melted=melt(predtable,id.vars=c(1,2),na.rm=TRUE)
+res=melted[,list(se=(value-sold_count)^2,
+                   ad=abs(value-sold_count),
+                   ape=abs(value-sold_count)/sold_count,sold_count),by=list(event_date,variable)]
+
+res=res[,list(mse=mean(se,na.rm=TRUE),mad=mean(ad,na.rm=TRUE),mape=mean(ape,na.rm=TRUE)),by=list(variable)]
+res
+
+
+#forecast 4 is the best one according to mape 
+
+
+
+```
+
+## Product 5 
+#### Bikini Top
+
+Beachwear products have higher sales numbers in summer, especially in the beginning of the summer. 
+
+```{r, echo=FALSE}
+data5 <- data[product_content_id == "5926527"]
+for(i in 1:length(data5$price)) {
+   if(data5$price[i]==-1) data5$price[i]=mean(data5$price[i-8:i+8],na.rm = T)
+   }
+  
+
+ggplot(data5,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data5$sold_count)),color = "blue") 
+
+```
+*Graph 16: Number of Sales over Time of Product 5*
+
+But as seen in the plot at recent months of 2020, because of CoViD-19 pandemics, sales of the bikini has decreased. So it may not be crucial in our decision procedure of the model. The sales still increased in may and june 2020 but it is not significant to call it as seasonality. So we used only 2020 data from 01.01.2020 to 12.06.2020.  
+
+```{r}
+data5_2020 <-  data5[event_date> "2019-12-31"]
+ggplot(data5_2020,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data5_2020$sold_count)),color = "blue") 
+
+```
+*Graph 17: Number of Sales in 2020 over Time of Product 5*
+
+#### Linear Regression Model
+
+We add one new column to our data. This column is specifying the summer months and months close to summer. Than we used every possible attribute at the initial model.
+
+Our initial model:
+```{r,echo = F}
+data5_2020[,'is_summer' := 0 ]
+for(i in 1: length(data5_2020$price)){
+ if(5 == month(as.Date(data5_2020$event_date[i]))|6 == month(as.Date(data5_2020$event_date[i])) | 7 == month(as.Date(data5_2020$event_date[i])) |  8 == month(as.Date(data5_2020$event_date[i]))  ){
+    data5_2020$is_summer[i] = 1
+  }
+}
+
+model5.1 <-  lm(sold_count~ is_summer  + price + visit_count + favored_count + basket_count + category_sold + category_brand_sold + category_visits, data = data5_2020 )
+summary(model5.1)
+```
+Akaike Information criteria :
+
+```{r,echo=F}
+AIC(model5.1)
+
+```
+
+After eliminating insignificant colums and adding the squares of the significant ones our final model is:
+
+```{r,echo=F}
+model5.7 <-  lm(sold_count~ is_summer+ I(visit_count^2)   + price + visit_count + favored_count   + visit_count:category_visits, data = data5_2020 )
+summary(model5.7)
+```
+Akaike Information criteria :
+
+```{r,echo=F}
+AIC(model5.7)
+
+```
+
+#### ARIMA Model
+
+In our ARIMA models we used the original dataset. We built two models by trail and auto.arima.
+
+```{r,echo=F}
+model5_Arima1 <- auto.arima(data5$sold_count)
+model5_Arima2 <- arima(data5$sold_count,c(3,0,2))
+
+```
+
+#### Time Series Cross Validation
+
+Now we have 3 different models. We will run a time series cross-validation with these models. The cross validation is going to be from 1 day to 50.
+
+
+```{r,echo = F}
+
+MAE5.1 <- c()
+MAE5.2 <- c()
+MAE5.3 <- c()
+
+for (i in 1:50){
+  data5_train <-  data5[1:(.N-i)]
+  data5_test <-  data5[(.N-i+1):.N]
+  
+  data5_2020_train <-  data5_2020[1:(.N-i)]
+  data5_2020_test <-  data5_2020[(.N-i+1):.N]
+  
+  
+  model5_lm <-  lm(sold_count~ is_summer+ I(visit_count^2)   + price + visit_count + favored_count   + visit_count:category_visits, data = data5_2020_train )
+
+  model5_arima <- arima(data5_train$sold_count,c(3,0,2))
+  model5_auto <- auto.arima(data5_train$sold_count)
+
+  pred_lm = predict(model5_lm,data5_2020_test)
+  
+
+  fore_arima <- forecast(model5_arima,i)
+  fore_auto  <- forecast(model5_auto,i)
+  
+  mm <-  abs(pred_lm - data5_test$sold_count )
+  mmm <- abs(fore_arima$mean - data5_2020_test$sold_count )
+  mmmm <- abs(fore_auto$mean - data5_test$sold_count )
+  
+  
+  MAE5.1 <-  c(MAE5.1,mm)
+  MAE5.2 <-  c(MAE5.2,mmm)
+  MAE5.3 <-  c(MAE5.3,mmmm)
+  
+}
+
+```
+Mean Absolute Error of our linear model:
+```{r,echo=F}
+mean ( MAE5.1)
+```
+
+Mean Absolute Error of our first ARIMA model:
+```{r,echo=F}
+mean ( MAE5.2)
+```
+Mean Absolute Error of our second ARIMA model:
+```{r,echo=F}
+mean ( MAE5.3)
+```
+The best model with lowest MAE value is our linear model.
+
+
+
+
+
+
+## Product 6
+#### Bluetooth Earphones
+
+In this kind of technological products we expect to have sales numbers without seasonality. We expect to see an effect of price.
+
+
+```{r,echo=F}
+data6 <- data[product_content_id == "6676673"]
+data6 <- data6[52:length(data6$price)]
+for(i in 1:length(data6$price)) {
+   if(data6$price[i]==-1) data6$price[i]=data6$price[i+8]
+   }
+  
+ggplot(data6,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data6$sold_count)),color = "blue") +geom_line(aes(event_date,data6$price*10),color = "red")
+
+```
+*Graph 18: Number of Sales over Time of Product 6*
+
+There seems no seasonality as we expected. But the price (shown with red with scale of *10) seems have no clear effect. This can be caused by a strategy of the company to raise the prices some time before the sales days. 
+
+
+
+```{r,echo=F}
+acf(data6$sold_count,lag.max = 80)
+```
+*Graph 19: Auto-Correlation Graph of the Number of Sales over Time of Product 3*
+
+There is a correlation between following days. Also there is a correlation at around lag = 20 days but there is no seasonality detected.
+
+
+The Black Friday effect is obvious on the graph at november. So we are going to smooth the data on these days.
+
+```{r}
+data6.2 <- data6
+Mean_correction <-  mean(data6.2$sold_count[100:200])
+data6.2$sold_count[140:170] <- Mean_correction
+```
+
+Before building our models, we assume some indicators which may effects over the sales. These are the previous price value, sales number of 2 and 7 days before, binary columns detecting the beginning time of schools, whether there is a sale, the time during CoViD-19 Pandemics. 
+
+Headphones are expected to have higher sales number sale time and the technology products sale discount is about 2.5%.
+
+Because of the covid-19 people doing sports at home by using bluetooth headphones; covid-19 is created as a dummy variable.
+
+
+```{r,echo=F}
+data6[,previous_price := shift(price,1)]
+data6.2[,previous_price := shift(price,1)]
+
+data6[,lag2_sold := shift(sold_count,2)]
+data6[,lag7_sold := shift(sold_count,7)]
+
+
+
+data6[,'is_school_starts':= { 
+  if (month(as.Date(event_date)) == 9) 1
+  else if (month(as.Date(event_date)) == 10 ) 1
+  else    0                  }
+  ,by = event_date]
+
+data6[,previous_price := { 
+  ifelse ( is.na(previous_price) , price , previous_price )
+}
+]
+
+
+data6[,'is_sales' := { 
+  ifelse ((price-previous_price)/ price  >= 0.029 , 1 , 0 )
+  }
+  ,by = (price)
+  ]
+
+
+
+data6[,'is_Covid':= { 
+  if (as.Date(event_date)>as.Date("2020-03-10") ) 1
+  else    0                  }
+  ,by = event_date]
+
+
+data6.2[,previous_price := { 
+  ifelse ( is.na(previous_price) , price , previous_price )
+}
+]
+
+data6.2[,'is_sales' := { 
+  ifelse ((price-previous_price)/ price  >= 0.029 , 1 , 0 )
+}
+,by = (price)
+]
+
+
+
+
+data6.2[,'is_Covid':= { 
+  if (as.Date(event_date)>as.Date("2020-03-10") ) 1
+  else    0                  }
+  ,by = event_date]
+data6.2[,'is_school_starts':= { 
+  if (month(as.Date(event_date)) == 9) 1
+  else if (month(as.Date(event_date)) == 10 ) 1
+  else    0                  }
+  ,by = event_date]
+
+
+data6.2[,lag2_sold := shift(sold_count,2)]
+data6.2[,lag7_sold := shift(sold_count,7)]
+
+
+```
+
+#### Linear Regression Model
+
+We built two models on two different datasets, the original data and the smoothened data.
+
+We start with using every possible parameter in the model. 
+```{r,echo=F,warning=F}
+model6.1.1 <- lm(sold_count~price+sold_count+visit_count+favored_count+basket_count+category_sold+category_brand_sold+category_visits+
+                   ty_visits+previous_price+is_school_starts+is_sales+is_Covid+lag2_sold+lag7_sold,data6)
+summary(model6.1.1)
+
+
+```
+There seems to exist insignificant attributes. 
+
+Now we calculate the Akaike Information Criteria.
+```{r,echo=FALSE,warning=F}
+AIC(model6.1.1)
+
+```
+
+After several steps to eliminate the insignificant attributes, our final linear regression model is:
+
+```{r,echo=FALSE,warning=F}
+model6.1.10 <- lm(sold_count~price+sold_count+favored_count+category_brand_sold+category_visits+
+                   is_school_starts+is_sales+visit_count+lag7_sold,data6)
+summary(model6.1.10)
+```
+
+
+We noticed that category_brand_sold, visit_count, favored_count has a high significance. So we add the square value of the attributes to the model and our final linear regression model is:
+
+
+```{r,echo=FALSE,warning=F}
+data6[,sq_cat_br_sold := category_brand_sold^2]
+data6[,sq_visit := visit_count^2]
+data6[,sq_favor := favored_count^2]
+
+model6.1.12 <- lm(sold_count~price+sold_count+favored_count+category_visits+
+                    is_school_starts+is_sales+sq_cat_br_sold+lag7_sold+sq_visit+sq_favor,data6)
+summary(model6.1.12)
+```
+Now we calculate the Akaike Information Criteria.
+
+```{r,echo=F,warning=F}
+AIC(model6.1.12)
+
+```
+ 
+
+It has a relatively high R^2 value of 0.93. AIC value is better than the initial model, we will move on with this model.
+
+
+After executing similar steps, our final linear model with the smoothened dataset is:
+
+```{r,echo=F,warning=F}
+data6.2[,sq_basket_count := basket_count^2]
+data6.2[,sq_favor := favored_count^2]
+data6.2[,lag1_sold:=shift(sold_count,1)]
+data6.2[,lag3_sold:=shift(sold_count,3)]
+
+model6.2.10 <- lm(sold_count~sold_count+favored_count+sq_favor+sq_basket_count+category_brand_sold+category_visits+
+                   ty_visits+previous_price+is_sales+is_Covid+lag1_sold+lag7_sold,data6.2)
+summary(model6.2.10)
+
+```
+
+Now we calculate the Akaike Information Criteria.
+
+
+```{r,echo=F,warning=F}
+AIC(model6.2.10)
+```
+ 
+
+
+#### ARIMA model
+
+We used 2 arima models per datasets, one by automated function auto.arima and one by trial.
+
+```{r,echo=F}
+model6.3.1 <- auto.arima(data6$sold_count)
+model6.3.2 <- auto.arima(data6.2$sold_count)
+model6.4.1 <- arima(data6$sold_count,c(3,1,3))
+model6.4.2 <- arima(data6.2$sold_count,c(3,1,3))
+
+
+```
+
+#### Time Series Cross Validation
+
+Now we have 6 different models. We will run a time series cross-validation with these models. The cross validation is going to be from 1 day to 50.
+
+```{r,echo=F,warning=F}
+MAE_vec6.1 <- c()
+MAE_vec6.2 <- c()
+MAE_vec6.3 <- c()
+
+MAE_vec6.4 <- c()
+MAE_vec6.5 <- c()
+MAE_vec6.6 <- c()
+
+
+
+for(i in 1:50){
+  
+  data6.1_train <- data6[1:(.N-i)] 
+  data6.1_test <-  data6[(.N-i+1):.N]
+  
+  data6.2_train <- data6.2[1:(.N-i)] 
+  data6.2_test <-  data6.2[(.N-i+1):.N]
+  
+  
+  model6.1.1 <- lm(sold_count~price+sold_count+favored_count+category_visits+
+                     is_school_starts+is_sales+sq_cat_br_sold+lag7_sold+sq_visit+sq_favor,data6.1_train)
+  model6.1.2 <- auto.arima(data6.1_train$sold_count)
+  model6.1.3 <- arima(data6.1_train$sold_count,c(3,1,3))
+
+  forecast1 <- predict(model6.1.1,data6.1_test)
+  forecast2 <- forecast(model6.1.2,i)
+  forecast3 <- forecast(model6.1.3,i)
+
+  
+  MAE6.1 <- mean(abs(forecast1-data6.1_test$sold_count))
+  MAE6.2 <- mean(abs(forecast2$mean-data6.1_test$sold_count))
+  MAE6.3 <- mean(abs(forecast3$mean-data6.1_test$sold_count))
+  
+  MAE_vec6.1 <- c(MAE_vec6.1,MAE6.1)
+  MAE_vec6.2 <- c(MAE_vec6.2,MAE6.2)
+  MAE_vec6.3 <- c(MAE_vec6.3,MAE6.3)
+  
+  model6.2.1 <- lm(sold_count~sold_count+favored_count+sq_favor+sq_basket_count+category_brand_sold+category_visits+
+                     ty_visits+previous_price+is_sales+is_Covid+lag1_sold+lag7_sold,data6.2_train)
+  model6.2.2 <- auto.arima(data6.2_train$sold_count)
+  model6.2.3 <- arima(data6.2_train$sold_count,c(3,1,3))
+  
+  forecast4 <- predict(model6.2.1,data6.2_test)
+  forecast5 <- forecast(model6.2.2,i)
+  forecast6 <- forecast(model6.2.3,i)
+  
+  
+  MAE6.4 <- mean(abs(forecast4-data6.2_test$sold_count))
+  MAE6.5 <- mean(abs(forecast5$mean-data6.2_test$sold_count))
+  MAE6.6 <- mean(abs(forecast6$mean-data6.2_test$sold_count))
+  
+  MAE_vec6.4 <- c(MAE_vec6.4,MAE6.4)
+  MAE_vec6.5 <- c(MAE_vec6.5,MAE6.5)
+  MAE_vec6.6 <- c(MAE_vec6.6,MAE6.6)
+  
+  
+}
+
+
+
+
+```
+
+
+Mean Absolute Error of Linear Model 1:
+```{r,echo=F}
+mean(MAE_vec6.1)
+```
+Mean Absolute Error of ARIMA Model 1:
+```{r,echo=F}
+mean(MAE_vec6.2)
+```
+Mean Absolute Error of ARIMA Model 2:
+```{r,echo=F}
+mean(MAE_vec6.3)
+
+```
+Mean Absolute Error of Linear Model 2:
+```{r,echo=F}
+mean(MAE_vec6.4)
+```
+Mean Absolute Error of ARIMA Model 3:
+```{r,echo=F}
+mean(MAE_vec6.5)
+```
+Mean Absolute Error of ARIMA Model 4:
+```{r,echo=F}
+mean(MAE_vec6.6)
+
+```
+
+
+It is clear that the model with lowest mean absolute error is our Linear model with the original dataset.
+
+
+
+
+
+
+
+
+
+
+## Product 7
+
+We start with filtering the data and removing the time where the product is not on the market. We also clean the price column. We plot the data.
+
+```{r,echo=F}
+
+data7 <- data[product_content_id == "7061886"]
+data7 <- data7[87:length(data7$price)]
+
+for(i in 1:length(data7$price)){
+  
+  if(data7$price[i]==-1){
+    data7$price[i]=data7$price[i+8]
+    
+  }}
+
+ggplot(data7,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data7$sold_count)),color = "blue") +geom_line(aes(event_date,data7$price/3),color = "red")
+```
+
+
+#### Linear Regression Model
+
+
+We start with using every possible parameter in the model. 
+Our initial model:
+```{r,echo=F}
+model7.1<-lm(sold_count~price+visit_count+favored_count+basket_count+category_sold+category_brand_sold+category_visits+ty_visits,data7)
+summary(model7.1)
+```
+Akaike Information Criteria of the model:
+ 
+```{r,echo=F}
+AIC(model7.1)
+
+```
+We move on with eliminating insignificant attributes and adding the squares of the most significant ones.
+
+And our final linear model is:
+
+```{r,echo=F}
+model2<-lm(sold_count~price+visit_count+basket_count+I(visit_count^2)+category_visits+visit_count*basket_count,data7)
+summary(model2)
+```
+ Akaike Information Criteria of the model:
+ 
+```{r,echo=F}
+AIC(model2)
+
+```
+ 
+
+Adjusted r-square value is 0.9278, which is acceptable. AIC value has reduced significantly from the initial model.
+
+All covariates significant
+
+We checked possible nonlinear correlations 
+
+We accept the model as fine and move on with this model.
+
+
+We run 10 fold cross validation to check its performance
+
+
+```{r,echo=F}
+
+
+CVmodel <- train(
+  sold_count~price+visit_count+basket_count+I(visit_count^2)+category_visits+visit_count*basket_count, 
+  data7,
+  method = "lm",
+  trControl = trainControl(
+    method = "cv", 
+    number = 10,
+    verboseIter = TRUE
+  )
+)
+CVmodel
+
+```
+
+R^2 Value of the cross validation is 0.8368 which is acceptable. 
+
+
+
+
+## Product 8
+#### Purifying Foaming Gel
+```{r,echo=F}
+data8 <- data[product_content_id == "85004"]
+for(i in 1:length(data8$price)){
+  if(data8$price[i]==-1){
+    data8$price[i]=mean(data8$price[1:length(data8$price)])
+     }
+}
+
+ggplot(data8,aes(event_date,sold_count)) + geom_line() + xlab("Date") + ylab("Number of Sales") + geom_line(aes(event_date,mean(data8$sold_count)),color = "blue") + geom_line(aes(event_date,(data8$price)),color = "red") 
+
+```
+*Graph 16: Number of Sales over Time of Product 8*
+
+The product seems to have a increased sales after March 2020 which corresponds to COVID-19 pandemics.
+
+Auto-Correlation graph of the sales:
+
+```{r,echo = F}
+acf(data8$sold_count,lag.max = 100)
+
+```
+*Graph 17: Auto Correlation graph of Product 8*
+
+Data has a correlation between neighboring days, there seems to exist a trend.
+
+
+We start with using every possible parameter in the model. 
+```{r,echo=F}
+model8.1 <- lm(sold_count~visit_count+favored_count+category_sold+basket_count+price+category_brand_sold+category_visits,data8)
+summary(model8.1)
+
+```
+There seems to exist insignificant attributes. 
+
+Now we calculate the Akaike Information Criteria.
+```{r,echo=FALSE}
+AIC(model8.1)
+
+```
+
+After several steps to eliminate the insignificant attributes, our final linear regression model is:
+
+```{r,echo =F}
+data8[,'is_Covid':= { 
+  if (as.Date(event_date)>as.Date("2020-03-10") ) 1
+  else    0                  }
+  ,by = event_date]
+
+model8.5 <- lm(sold_count~visit_count+is_Covid+I(visit_count^2)+basket_count+price,data8)
+summary(model8.5)
+
+```
+It has a relatively hig R^2 with 0.81. 
+
+Now we check its Akaike Information Criteria value.
+```{r,echo=F}
+AIC(model8.5)
+```
+
+#### ARIMA models
+
+We have two ARIMA models one by auto.arima and the other by our trial.
+
+
+```{r}
+auto.arima(data8$sold_count)
+model8 <- arima(data8$sold_count,c(2,1,3))
+
+```
+#### Time Series Cross Validation
+
+Now we have 3 different models. We will run a time series cross-validation with these models. The cross validation is going to be from 1 day to 50.
+
+
+```{r,echo = F}
+
+MAE1 <- c()
+MAE2 <- c()
+MAE3 <- c()
+
+for (i in 1:50){
+  data8_train <-  data8[1:(.N-i)]
+  data8_test <-  data8[(.N-i+1):.N]
+  
+  model8_lm <-  lm(sold_count~visit_count+is_Covid+I(visit_count^2)+basket_count+price,data8_train)
+
+  model8_arima <- arima(data8_train$sold_count,c(2,1,3))
+  model8_auto <- auto.arima(data8_train$sold_count)
+  
+  Y_lm = predict(model8_lm,data8_test)
+  
+  Y_arima <-forecast(model8_arima,i)
+  Y_auto <-  forecast(model8_auto,i)
+  
+  mm <-  abs(Y_lm - data8_test$sold_count )
+  mmm <- abs(Y_arima$mean - data8_test$sold_count )
+  mmmm <- abs(Y_auto$mean - data8_test$sold_count )
+  
+  
+  MAE1 <-  c(MAE1,mm)
+  MAE2 <-  c(MAE2,mmm)
+  MAE3 <-  c(MAE3,mmmm)
+  
+}
+
+```
+Mean Absolute Error of our linear model:
+```{r,echo=F}
+mean ( MAE1)
+```
+
+Mean Absolute Error of our first ARIMA model:
+```{r,echo=F}
+mean ( MAE2)
+```
+Mean Absolute Error of our second ARIMA model:
+```{r,echo=F}
+mean ( MAE3)
+```
+The best model with lowest MAE value is our linear model.
+
+
+
+
+
+
+
+
+
+
